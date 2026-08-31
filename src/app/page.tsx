@@ -14,6 +14,9 @@ import {
   Square,
   FileText,
   Trash2,
+  Loader2,
+  CheckCircle2,
+  AlertCircle,
 } from "lucide-react";
 
 type Message = {
@@ -29,9 +32,14 @@ type Session = {
   lastActiveAt: string;
 };
 
+type UploadStatus = "uploading" | "done" | "error";
+
 type Attachment = {
   id: string;
   file: File;
+  status: UploadStatus;
+  documentId?: string;
+  chunkCount?: number;
 };
 
 type VoiceState = "idle" | "listening" | "thinking" | "speaking";
@@ -90,8 +98,6 @@ export default function ChatPage() {
     }
   };
 
-  // "New chat" just clears local state — no session is created until
-  // the user actually sends a message.
   const handleNewChat = () => {
     setMessages([]);
     setAttachments([]);
@@ -110,13 +116,53 @@ export default function ChatPage() {
     }
   };
 
+  // Uploads a single file to /api/documents and updates its status in place.
+  const uploadFile = async (attachmentId: string, file: File) => {
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const res = await fetch("/api/documents", {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+      const data = await res.json();
+
+      setAttachments((prev) =>
+        prev.map((a) =>
+          a.id === attachmentId
+            ? {
+              ...a,
+              status: "done",
+              documentId: data.document?.id,
+              chunkCount: data.chunkCount,
+            }
+            : a
+        )
+      );
+    } catch (err) {
+      console.error("Failed to upload file", err);
+      setAttachments((prev) =>
+        prev.map((a) => (a.id === attachmentId ? { ...a, status: "error" } : a))
+      );
+    }
+  };
+
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
     if (files.length === 0) return;
-    setAttachments((prev) => [
-      ...prev,
-      ...files.map((file) => ({ id: crypto.randomUUID(), file })),
-    ]);
+
+    const newAttachments: Attachment[] = files.map((file) => ({
+      id: crypto.randomUUID(),
+      file,
+      status: "uploading",
+    }));
+
+    setAttachments((prev) => [...prev, ...newAttachments]);
+    newAttachments.forEach((a) => uploadFile(a.id, a.file));
+
     e.target.value = "";
   };
 
@@ -126,11 +172,23 @@ export default function ChatPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if ((!input.trim() && attachments.length === 0) || loading) return;
+    if (loading) return;
+
+    const stillUploading = attachments.some((a) => a.status === "uploading");
+    if (stillUploading) return; // wait for uploads to finish before sending
+
+    if (!input.trim() && attachments.length === 0) return;
+
+    const uploadedDocs = attachments.filter((a) => a.status === "done");
 
     const label =
-      attachments.length > 0
-        ? [input.trim(), `[${attachments.length} file(s) attached]`]
+      uploadedDocs.length > 0
+        ? [
+          input.trim(),
+          `[Referencing ${uploadedDocs.length} uploaded document(s): ${uploadedDocs
+            .map((a) => a.file.name)
+            .join(", ")}]`,
+        ]
           .filter(Boolean)
           .join(" ")
         : input;
@@ -147,20 +205,20 @@ export default function ChatPage() {
     setLoading(true);
 
     try {
-      // TODO: if attachments.length > 0, upload files first (multipart or
-      // presigned URL) and pass their references in the body alongside message.
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId, message: label }),
+        body: JSON.stringify({
+          sessionId,
+          message: label,
+          documentIds: uploadedDocs.map((a) => a.documentId).filter(Boolean),
+        }),
       });
 
       if (!res.ok) throw new Error(`Request failed: ${res.status}`);
 
       const data = await res.json();
 
-      // First message of a chat — adopt the server-created session id
-      // and refresh the sidebar list so the new chat shows up.
       if (!sessionId && data.sessionId) {
         setSessionId(data.sessionId);
         loadSessions();
@@ -193,13 +251,11 @@ export default function ChatPage() {
   const openVoice = () => {
     setVoiceOpen(true);
     setVoiceState("listening");
-    // TODO: start mic capture / VAD here
   };
 
   const closeVoice = () => {
     setVoiceOpen(false);
     setVoiceState("idle");
-    // TODO: stop mic capture / tear down audio stream here
   };
 
   const cycleVoiceDemo = () => {
@@ -209,6 +265,8 @@ export default function ChatPage() {
       return "listening";
     });
   };
+
+  const anyUploading = attachments.some((a) => a.status === "uploading");
 
   return (
     <div className="flex h-screen w-full bg-neutral-900 text-neutral-100 antialiased">
@@ -287,7 +345,7 @@ export default function ChatPage() {
             {messages.length === 0 && !loading && (
               <div className="flex h-full flex-col items-center justify-center pt-20 text-center text-neutral-500">
                 <Bot className="mb-3 h-8 w-8 text-neutral-600" />
-                <p className="text-sm">Ask a question to get started.</p>
+                <p className="text-sm">Ask a question, or attach a document to ground answers in it.</p>
               </div>
             )}
 
@@ -345,10 +403,28 @@ export default function ChatPage() {
                 {attachments.map((a) => (
                   <div
                     key={a.id}
-                    className="flex items-center gap-1.5 rounded-lg border border-neutral-700 bg-neutral-800 px-2.5 py-1.5 text-xs text-neutral-200"
+                    className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs ${a.status === "error"
+                        ? "border-red-800 bg-red-950/40 text-red-300"
+                        : "border-neutral-700 bg-neutral-800 text-neutral-200"
+                      }`}
                   >
-                    <FileText className="h-3.5 w-3.5 text-neutral-400" />
+                    {a.status === "uploading" && (
+                      <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-neutral-400" />
+                    )}
+                    {a.status === "done" && (
+                      <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
+                    )}
+                    {a.status === "error" && (
+                      <AlertCircle className="h-3.5 w-3.5 shrink-0 text-red-400" />
+                    )}
+                    <FileText className="h-3.5 w-3.5 shrink-0 text-neutral-400" />
                     <span className="max-w-[140px] truncate">{a.file.name}</span>
+                    {a.status === "done" && a.chunkCount != null && (
+                      <span className="text-neutral-500">· {a.chunkCount} chunks</span>
+                    )}
+                    {a.status === "error" && (
+                      <span>· failed</span>
+                    )}
                     <button
                       type="button"
                       onClick={() => removeAttachment(a.id)}
@@ -407,7 +483,7 @@ export default function ChatPage() {
 
               <button
                 type="submit"
-                disabled={(!input.trim() && attachments.length === 0) || loading}
+                disabled={(!input.trim() && attachments.length === 0) || loading || anyUploading}
                 aria-label="Send message"
                 className="mb-2 mr-1 shrink-0 rounded-lg bg-neutral-100 p-1.5 text-neutral-900 transition hover:bg-neutral-300 disabled:opacity-30 disabled:cursor-not-allowed"
               >
