@@ -44,6 +44,8 @@ type Attachment = {
 
 type VoiceState = "idle" | "listening" | "thinking" | "speaking";
 
+import { useVoiceRecorder } from "@/src/hooks/useVoiceRecorder";
+
 export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -54,6 +56,9 @@ export default function ChatPage() {
   const [sessionsLoading, setSessionsLoading] = useState(true);
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [voiceState, setVoiceState] = useState<VoiceState>("idle");
+
+  const { record, stop: stopRecording } = useVoiceRecorder();
+  const [voiceTranscript, setVoiceTranscript] = useState("");
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -248,12 +253,42 @@ export default function ChatPage() {
   };
 
   // --- Voice mode ---
-  const openVoice = () => {
+  const openVoice = async () => {
     setVoiceOpen(true);
+    setVoiceTranscript("");
     setVoiceState("listening");
+
+    try {
+      const audioBlob = await record();
+      setVoiceState("thinking");
+
+      const formData = new FormData();
+      formData.append("audio", audioBlob, "voice.webm");
+
+      const res = await fetch("/api/stt", { method: "POST", body: formData });
+      const data = await res.json();
+
+      if (!res.ok || !data.transcript) {
+        throw new Error(data.error || "No transcript returned");
+      }
+
+      setVoiceTranscript(data.transcript);
+
+      // Feed the transcript into the existing chat pipeline.
+      // TODO: once TTS is added, setVoiceState("speaking") here instead
+      // of closing, and play back the audio response.
+      setInput(data.transcript);
+      setVoiceOpen(false);
+      setVoiceState("idle");
+    } catch (err) {
+      console.error("Voice capture failed", err);
+      setVoiceState("idle");
+      setVoiceOpen(false);
+    }
   };
 
   const closeVoice = () => {
+    stopRecording();
     setVoiceOpen(false);
     setVoiceState("idle");
   };
@@ -301,8 +336,8 @@ export default function ChatPage() {
                 key={s.id}
                 onClick={() => loadSessionMessages(s.id)}
                 className={`group flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm text-left truncate transition ${s.id === sessionId
-                    ? "bg-neutral-800 text-neutral-100"
-                    : "text-neutral-300 hover:bg-neutral-800/60"
+                  ? "bg-neutral-800 text-neutral-100"
+                  : "text-neutral-300 hover:bg-neutral-800/60"
                   }`}
               >
                 <MessageSquare className="h-4 w-4 shrink-0 text-neutral-400" />
@@ -357,8 +392,8 @@ export default function ChatPage() {
               >
                 <div
                   className={`flex h-8 w-8 shrink-0 select-none items-center justify-center rounded-lg ${msg.role === "assistant"
-                      ? "bg-emerald-600 text-white"
-                      : "bg-neutral-700 text-neutral-200"
+                    ? "bg-emerald-600 text-white"
+                    : "bg-neutral-700 text-neutral-200"
                     }`}
                 >
                   {msg.role === "assistant" ? (
@@ -370,8 +405,8 @@ export default function ChatPage() {
 
                 <div
                   className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed max-w-[85%] ${msg.role === "user"
-                      ? "bg-neutral-800 text-neutral-100 rounded-tr-none"
-                      : "bg-neutral-950/70 border border-neutral-800 text-neutral-200 rounded-tl-none shadow-sm"
+                    ? "bg-neutral-800 text-neutral-100 rounded-tr-none"
+                    : "bg-neutral-950/70 border border-neutral-800 text-neutral-200 rounded-tl-none shadow-sm"
                     }`}
                 >
                   {msg.content}
@@ -404,8 +439,8 @@ export default function ChatPage() {
                   <div
                     key={a.id}
                     className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs ${a.status === "error"
-                        ? "border-red-800 bg-red-950/40 text-red-300"
-                        : "border-neutral-700 bg-neutral-800 text-neutral-200"
+                      ? "border-red-800 bg-red-950/40 text-red-300"
+                      : "border-neutral-700 bg-neutral-800 text-neutral-200"
                       }`}
                   >
                     {a.status === "uploading" && (
@@ -496,6 +531,10 @@ export default function ChatPage() {
           </div>
         </div>
 
+        {voiceTranscript && (
+          <p className="max-w-sm text-center text-sm text-neutral-300">"{voiceTranscript}"</p>
+        )}
+
         {/* Live Voice Overlay */}
         {voiceOpen && (
           <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-8 bg-neutral-950/95 backdrop-blur-sm">
@@ -517,10 +556,10 @@ export default function ChatPage() {
                   <div
                     key={i}
                     className={`w-1.5 rounded-full bg-emerald-400 transition-all duration-300 ${voiceState === "listening"
-                        ? "animate-pulse"
-                        : voiceState === "speaking"
-                          ? "animate-bounce"
-                          : ""
+                      ? "animate-pulse"
+                      : voiceState === "speaking"
+                        ? "animate-bounce"
+                        : ""
                       }`}
                     style={{
                       height:
