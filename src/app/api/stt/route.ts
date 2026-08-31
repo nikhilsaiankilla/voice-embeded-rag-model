@@ -1,20 +1,22 @@
-// FILE: src/app/api/stt/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { transcribeAudio } from "@/src/lib/sarvam";
 
 export async function POST(req: NextRequest) {
-    const formData = await req.formData();
-    const audio = formData.get("audio") as File | null;
-
-    if (!audio) {
-        return NextResponse.json({ error: "audio is required" }, { status: 400 });
-    }
-
     try {
-        const transcript = await transcribeAudio(audio, audio.name || "audio.webm");
-        return NextResponse.json({ transcript });
-    } catch (err) {
-        console.error("STT error", err);
-        return NextResponse.json({ error: "transcription failed" }, { status: 500 });
+        const formData = await req.formData();
+        const file = formData.get("audio") as Blob | null;
+
+        if (!file || file.size === 0) {
+            return NextResponse.json({ transcript: "" }, { status: 200 });
+        }
+
+        const transcript = await transcribeAudio(file);
+        return NextResponse.json({ transcript: transcript ?? "" });
+    } catch (err: any) {
+        console.error("STT Route Error:", err);
+        return NextResponse.json(
+            { error: err.message || "Failed to transcribe audio" },
+            { status: 500 }
+        );
     }
 }
