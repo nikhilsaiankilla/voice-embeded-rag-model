@@ -5,11 +5,13 @@ import { chatSessions, chatMessages } from "@/src/db/schema";
 
 export async function DELETE(
     _req: NextRequest,
-    { params }: { params: { id: string } }
+    { params }: { params: Promise<{ id: string }> }
 ) {
     const db = await getDb();
-    await db.delete(chatMessages).where(eq(chatMessages.sessionId, params.id));
-    await db.delete(chatSessions).where(eq(chatSessions.id, params.id));
+    const paramsId = (await params).id;
+
+    await db.delete(chatMessages).where(eq(chatMessages.sessionId, paramsId));
+    await db.delete(chatSessions).where(eq(chatSessions.id, paramsId));
 
     return NextResponse.json({ success: true });
 }

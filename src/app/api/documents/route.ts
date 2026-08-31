@@ -4,16 +4,14 @@ import { getDb } from "@/src/db";
 import { documents } from "@/src/db/schema";
 import { openai } from "@/src/lib/openai";
 import { upsertChunks, type UpsertChunk } from "@/src/lib/pinecone";
+import PDFParser from "pdf2json";
 
 const NAMESPACE = process.env.PINECONE_NAMESPACE ?? "default";
 const EMBEDDING_MODEL = "text-embedding-3-small";
 
-const CHUNK_SIZE = 800; // chars, ~approx 150-200 tokens
+const CHUNK_SIZE = 800;
 const CHUNK_OVERLAP = 150;
 
-// Simple fixed-size chunking with overlap. Swap this out for the
-// semantic/hierarchical strategy later — this just gets ingestion working
-// end-to-end with the existing pinecone.ts helpers.
 function chunkText(text: string): string[] {
     const clean = text.replace(/\s+/g, " ").trim();
     const chunks: string[] = [];
@@ -37,6 +35,45 @@ async function embedBatch(texts: string[]): Promise<number[][]> {
     return res.data.map((d) => d.embedding);
 }
 
+// pdf2json is callback/event-based, so wrap it in a Promise.
+// It gives text pre-split into pages -> texts -> runs (R), URI-encoded.
+function parsePdfBuffer(buffer: Buffer): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const parser = new PDFParser();
+
+        parser.on("pdfParser_dataError", (errData: any) => {
+            reject(errData?.parserError ?? errData);
+        });
+
+        parser.on("pdfParser_dataReady", (pdfData: any) => {
+            try {
+                const text = pdfData.Pages.map((page: any) =>
+                    page.Texts.map((t: any) =>
+                        t.R.map((r: any) => decodeURIComponent(r.T)).join("")
+                    ).join(" ")
+                ).join("\n\n");
+                resolve(text);
+            } catch (err) {
+                reject(err);
+            }
+        });
+
+        parser.parseBuffer(buffer);
+    });
+}
+
+async function extractText(file: File): Promise<string> {
+    const isPdf =
+        file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+
+    if (isPdf) {
+        const buffer = Buffer.from(await file.arrayBuffer());
+        return parsePdfBuffer(buffer);
+    }
+
+    return file.text();
+}
+
 export async function POST(req: NextRequest) {
     const db = await getDb();
     const formData = await req.formData();
@@ -46,12 +83,11 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: "file is required" }, { status: 400 });
     }
 
-    const text = await file.text();
+    const text = await extractText(file);
     if (!text.trim()) {
         return NextResponse.json({ error: "file has no readable text" }, { status: 400 });
     }
 
-    // Record the document
     const [doc] = await db
         .insert(documents)
         .values({
@@ -60,13 +96,11 @@ export async function POST(req: NextRequest) {
         })
         .returning();
 
-    // Chunk
     const chunks = chunkText(text);
     if (chunks.length === 0) {
         return NextResponse.json({ error: "no chunks produced" }, { status: 400 });
     }
 
-    // Embed in batches of 100 (OpenAI embeddings input limit headroom)
     const EMBED_BATCH = 100;
     const upsertPayload: UpsertChunk[] = [];
 
@@ -90,7 +124,6 @@ export async function POST(req: NextRequest) {
         });
     }
 
-    // Store in Pinecone using the existing rate-limited upsert helper
     await upsertChunks(NAMESPACE, upsertPayload);
 
     return NextResponse.json({
