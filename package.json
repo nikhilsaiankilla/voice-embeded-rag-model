@@ -14,7 +14,9 @@
     "@upstash/redis": "^1.38.3",
     "dotenv": "^17.4.2",
     "drizzle-orm": "^0.45.2",
+    "jszip": "^3.10.1",
     "lucide-react": "^1.38.0",
+    "mammoth": "^1.12.2",
     "next": "16.3.3",
     "openai": "^7.8.0",
     "pdf-parse": "^2.4.5",
@@ -24,7 +26,8 @@
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1"
+    "remark-gfm": "^4.0.1",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

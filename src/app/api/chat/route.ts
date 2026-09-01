@@ -11,10 +11,14 @@ const CHAT_MODEL = "gpt-4o-mini";
 const NAMESPACE = process.env.PINECONE_NAMESPACE ?? "default";
 const HISTORY_LIMIT = 20;
 const TOP_K = 5;
+// When the user has attached specific documents, pull more chunks per doc
+// so we're not starved for context on longer files like resumes.
+const TOP_K_SCOPED_PER_DOC = 8;
+const TOP_K_SCOPED_MAX = 24;
 
 export async function POST(req: NextRequest) {
     const db = await getDb();
-    const { sessionId, message } = await req.json();
+    const { sessionId, message, documentIds } = await req.json();
 
     if (!message || typeof message !== "string" || !message.trim()) {
         return new Response(JSON.stringify({ error: "message is required" }), {
@@ -22,6 +26,11 @@ export async function POST(req: NextRequest) {
             headers: { "Content-Type": "application/json" },
         });
     }
+
+    const scopedDocumentIds: string[] = Array.isArray(documentIds)
+        ? documentIds.filter((id): id is string => typeof id === "string" && id.length > 0)
+        : [];
+    const isScoped = scopedDocumentIds.length > 0;
 
     let activeSessionId = sessionId as string | undefined;
 
@@ -56,12 +65,37 @@ export async function POST(req: NextRequest) {
         input: message,
     });
     const queryVector = embeddingRes.data[0].embedding;
-    const matches = await querySimilar(NAMESPACE, queryVector, TOP_K);
+
+    // When the user attached specific documents, restrict retrieval to those
+    // documents' chunks via a Pinecone metadata filter, and pull more chunks
+    // since we're no longer sampling across the whole namespace.
+    const topK = isScoped
+        ? Math.min(TOP_K_SCOPED_MAX, TOP_K_SCOPED_PER_DOC * scopedDocumentIds.length)
+        : TOP_K;
+
+    let matches = await querySimilar(
+        NAMESPACE,
+        queryVector,
+        topK,
+        isScoped ? { sourceId: { $in: scopedDocumentIds } } : undefined
+    );
+
+    // Safety net: if a scoped query somehow returns nothing (e.g. the doc
+    // finished uploading but indexing hadn't propagated yet), fall back to
+    // an unfiltered search rather than silently answering ungrounded.
+    if (isScoped && matches.length === 0) {
+        matches = await querySimilar(NAMESPACE, queryVector, TOP_K);
+    }
+
     const context = matches.map((m, i) => `[${i + 1}] ${m.text}`).join("\n\n");
 
-    const systemPrompt = context
-        ? `You are a helpful assistant. Use the retrieved context below to answer the user's question when it's relevant. If the context is only partially relevant or doesn't fully cover the question, fill the gaps using your own general knowledge — don't refuse or say you lack information just because the context is incomplete. If the context is entirely irrelevant to the question, ignore it and answer from your own knowledge instead.\n\nRetrieved context:\n${context}`
-        : `You are a helpful assistant. No relevant document context was found for this question — answer it using your own general knowledge.`;
+    const systemPrompt = isScoped
+        ? context
+            ? `You are a helpful assistant. The user has attached specific document(s) and is asking about them. Answer strictly using the retrieved context below — it comes directly from the attached document(s). Do not fill gaps with general knowledge or invented details; if the context doesn't contain the answer, say so explicitly rather than guessing.\n\nRetrieved context:\n${context}`
+            : `You are a helpful assistant. The user attached document(s) for this question, but no matching content could be retrieved from them (the upload may still be indexing, or may not contain relevant information). Tell the user this plainly instead of guessing or fabricating details about the document.`
+        : context
+            ? `You are a helpful assistant. Use the retrieved context below to answer the user's question when it's relevant. If the context is only partially relevant or doesn't fully cover the question, fill the gaps using your own general knowledge — don't refuse or say you lack information just because the context is incomplete. If the context is entirely irrelevant to the question, ignore it and answer from your own knowledge instead.\n\nRetrieved context:\n${context}`
+            : `You are a helpful assistant. No relevant document context was found for this question — answer it using your own general knowledge.`;
 
     const historyMessages = priorMessages.slice(-HISTORY_LIMIT).map((m) => ({
         role: m.role as "user" | "assistant",
@@ -79,8 +113,6 @@ export async function POST(req: NextRequest) {
                 controller.enqueue(encoder.encode(JSON.stringify(obj) + "\n"));
             };
 
-            // Metadata first, so the UI can show grounding state before any
-            // tokens arrive.
             send({
                 type: "meta",
                 sessionId: activeSessionIdFinal,

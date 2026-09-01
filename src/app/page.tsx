@@ -1,11 +1,13 @@
+// FILE: src/app/chat/page.tsx
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Radio } from "lucide-react";
+import { Radio, Volume2, VolumeX } from "lucide-react";
 import { useVoiceRecorder, VOICE_BAR_COUNT } from "@/src/hooks/useVoiceRecorder";
 import { useAudioHistory } from "@/src/hooks/useAudioHistory";
 import { useProgressiveAudioPlayer } from "@/src/hooks/useProgressiveAudioPlayer";
-import { useLiveConversation, LivePhase } from "@/src/hooks/useLiveConversation";
+import { useLiveConversation } from "@/src/hooks/useLiveConversation";
+import { useMessageAudioPlayer } from "@/src/hooks/useMessageAudioPlayer";
 import { ChatSidebar, Session } from "@/src/components/chat/ChatSidebar";
 import { ChatMessageItem, ChatLoadingDots, Message } from "@/src/components/chat/ChatMessageItem";
 import { ChatInput } from "@/src/components/chat/ChatInput";
@@ -22,16 +24,26 @@ export default function ChatPage() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(true);
 
-  // ---- refs that need to exist before any hook/callback below references them ----
+  // Voice OUTPUT is opt-in: off by default for normal text/voice-input chat,
+  // so TTS only fires when the user explicitly wants to hear replies. Live
+  // mode forces it on regardless (that's the entire point of live mode).
+  const [voiceOutputEnabled, setVoiceOutputEnabled] = useState(false);
+
+  // refs that need to exist before any hook/callback below references them
   const abortControllerRef = useRef<AbortController | null>(null);
   const ttsQueuedThisTurnRef = useRef(false);
   const liveModeRef = useRef(false);
   const sentenceBufferRef = useRef("");
-  // Holds the live-conversation controller so earlier-declared callbacks can
-  // reach it without a temporal-dead-zone reference to `liveConversation`.
   const liveConversationRef = useRef<ReturnType<typeof useLiveConversation> | null>(null);
+  // Always points at the CURRENT render's sendMessage closure (fresh sessionId,
+  // fresh everything). Kept in sync via a plain assignment on every render —
+  // see the line right after sendMessage's definition below. This is what
+  // lets useCallback(..., []) — memoized functions like handleLiveUtterance —
+  // call sendMessage without going stale.
+  const sendMessageRef = useRef<
+    ((text: string, uploadedDocs?: Attachment[]) => Promise<void>) | undefined
+  >(undefined);
 
-  // Fires when the progressive TTS player finishes ALL queued audio for a turn.
   const handleAssistantFinishedSpeaking = useCallback(() => {
     if (liveModeRef.current) {
       liveConversationRef.current?.resumeListening();
@@ -47,7 +59,10 @@ export default function ChatPage() {
     onAllPlaybackEnded: handleAssistantFinishedSpeaking,
   });
 
-  // Now that stopAssistantSpeech exists, it's safe to reference it here.
+  // Separate on-demand player for the per-message "click speaker to hear
+  // this reply" button — independent of the live/streaming player above.
+  const messageAudio = useMessageAudioPlayer();
+
   const handleBargeIn = useCallback(() => {
     stopAssistantSpeech();
     sentenceBufferRef.current = "";
@@ -56,7 +71,7 @@ export default function ChatPage() {
     setIsStreaming(false);
   }, [stopAssistantSpeech]);
 
-  // Voice recording (manual push-to-talk, unchanged from before)
+  // Voice recording (manual push-to-talk)
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [levels, setLevels] = useState<number[]>(Array(VOICE_BAR_COUNT).fill(0.05));
@@ -89,6 +104,7 @@ export default function ChatPage() {
 
   const loadSessionMessages = async (id: string) => {
     stopAssistantSpeech();
+    messageAudio.stop();
     setSessionId(id);
     setAttachments([]);
     setInput("");
@@ -109,6 +125,7 @@ export default function ChatPage() {
 
   const handleNewChat = () => {
     stopAssistantSpeech();
+    messageAudio.stop();
     setMessages([]);
     setAttachments([]);
     setInput("");
@@ -169,12 +186,20 @@ export default function ChatPage() {
     setAttachments((prev) => prev.filter((a) => a.id !== id));
   };
 
-  const sendMessage = async (text: string, uploadedDocs: Attachment[] = [], enableTTS = true) => {
+  // sendMessage derives whether to speak from live mode + the explicit
+  // voice-output toggle, so a normal typed message never triggers TTS calls
+  // unless the user asked for audio replies. This is a plain function (not
+  // useCallback), so it's rebuilt fresh every render with the current
+  // sessionId/voiceOutputEnabled in its closure — sendMessageRef (synced
+  // right below) is how memoized callbacks reach this fresh version safely.
+  const sendMessage = async (text: string, uploadedDocs: Attachment[] = []) => {
     if (loading || isStreaming) return;
     if (!text.trim() && uploadedDocs.length === 0) return;
 
-    // Barge-in: interrupt previous speech / previous in-flight request
+    const enableTTS = liveModeRef.current || voiceOutputEnabled;
+
     stopAssistantSpeech();
+    messageAudio.stop();
     sentenceBufferRef.current = "";
     abortControllerRef.current?.abort();
     const controller = new AbortController();
@@ -262,7 +287,7 @@ export default function ChatPage() {
               );
             }
 
-            // Progressive TTS: parse full sentences as they complete
+            // Progressive TTS — only runs when the caller actually wants audio.
             if (enableTTS) {
               sentenceBufferRef.current += event.content;
               const match = sentenceBufferRef.current.match(/^([^.!?\n]+[.!?\n]+)([\s\S]*)$/);
@@ -310,7 +335,6 @@ export default function ChatPage() {
       }
     } catch (err: any) {
       if (err?.name === "AbortError") {
-        // Barged in — partial reply (if any) stays as-is, nothing more to do.
         return;
       }
       console.error("Failed to send message", err);
@@ -329,11 +353,17 @@ export default function ChatPage() {
     }
   };
 
+  // Runs on EVERY render, right after sendMessage is (re)defined — this is
+  // what keeps sendMessageRef pointing at a closure with the current
+  // sessionId, unlike setting it from inside sendMessage (which would only
+  // update at call-time, one render behind).
+  sendMessageRef.current = sendMessage;
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (attachments.some((a) => a.status === "uploading")) return;
     const uploadedDocs = attachments.filter((a) => a.status === "done");
-    await sendMessage(input, uploadedDocs, true);
+    await sendMessage(input, uploadedDocs);
   };
 
   const transcribe = async (blob: Blob): Promise<string | null> => {
@@ -348,7 +378,6 @@ export default function ChatPage() {
         throw new Error(data.error || `STT request failed (${res.status})`);
       }
 
-      // Explicitly check for undefined/null rather than falsy empty string ""
       if (typeof data.transcript !== "string") {
         return null;
       }
@@ -362,9 +391,9 @@ export default function ChatPage() {
     }
   };
 
-  // Manual push-to-talk (used when NOT in live mode)
   const startRecording = () => {
     stopAssistantSpeech();
+    messageAudio.stop();
     sentenceBufferRef.current = "";
 
     setIsRecording(true);
@@ -387,7 +416,7 @@ export default function ChatPage() {
     setIsRecording(false);
     if (!blob) return;
     const transcript = await transcribe(blob);
-    if (transcript) await sendMessage(transcript, [], true);
+    if (transcript) await sendMessage(transcript, []);
   };
 
   const handleCancelRecording = async () => {
@@ -397,10 +426,13 @@ export default function ChatPage() {
     setIsTranscribing(false);
   };
 
-  // ---- Live (hands-free, full-duplex) mode ----
+  // ---- Live (hands-free, full-duplex) mode — always speaks ----
+  // Memoized with an empty dep array on purpose (VAD/recorder callbacks need
+  // a stable reference), so it must NEVER call sendMessage directly — always
+  // go through sendMessageRef.current, which is refreshed every render above.
   const handleLiveUtterance = useCallback(async (blob: Blob, turnId: number) => {
     const transcript = await transcribe(blob);
-    if (!liveConversationRef.current?.isTurnCurrent(turnId)) return; // superseded by a newer barge-in
+    if (!liveConversationRef.current?.isTurnCurrent(turnId)) return;
 
     if (!transcript || !transcript.trim()) {
       liveConversationRef.current?.resumeListening();
@@ -408,11 +440,9 @@ export default function ChatPage() {
     }
 
     ttsQueuedThisTurnRef.current = false;
-    await sendMessage(transcript, [], true);
+    await sendMessageRef.current?.(transcript, []);
 
     if (!liveConversationRef.current?.isTurnCurrent(turnId)) return;
-    // If nothing ever got queued for TTS (empty reply, TTS failure), the
-    // player's onAllPlaybackEnded will never fire — resume listening ourselves.
     if (!ttsQueuedThisTurnRef.current) {
       liveConversationRef.current?.resumeListening();
     }
@@ -424,13 +454,12 @@ export default function ChatPage() {
     onBargeIn: handleBargeIn,
   });
 
-  // Keep the ref in sync every render so earlier-declared callbacks can reach
-  // the latest controller instance without a stale closure.
   liveConversationRef.current = liveConversation;
 
   const toggleLiveMode = async () => {
     if (liveConversation.phase === "off") {
       stopAssistantSpeech();
+      messageAudio.stop();
       setInput("");
       liveModeRef.current = true;
       await liveConversation.start();
@@ -441,6 +470,14 @@ export default function ChatPage() {
       abortControllerRef.current?.abort();
     }
   };
+
+  const handleToggleMessageSpeak = useCallback(
+    (id: string, content: string) => {
+      stopAssistantSpeech(); // don't let it overlap live/streaming playback
+      messageAudio.speak(id, content);
+    },
+    [stopAssistantSpeech, messageAudio]
+  );
 
   const anyUploading = attachments.some((a) => a.status === "uploading");
   const isBusy = loading || isStreaming;
@@ -464,12 +501,32 @@ export default function ChatPage() {
             <span className="font-medium text-sm tracking-tight">Voice RAG Assistant</span>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
             {sessionId && (
-              <span className="max-w-[240px] truncate text-xs text-neutral-500 font-normal">
+              <span className="max-w-[240px] truncate text-xs text-neutral-500 font-normal mr-1">
                 {currentSessionTitle}
               </span>
             )}
+
+            {/* Voice output toggle — only relevant outside live mode, since
+                live mode always speaks. Hidden while live to avoid implying
+                it can be turned off mid-call. */}
+            {!isLive && (
+              <button
+                type="button"
+                onClick={() => setVoiceOutputEnabled((v) => !v)}
+                aria-pressed={voiceOutputEnabled}
+                title={voiceOutputEnabled ? "Voice replies on" : "Voice replies off"}
+                className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition cursor-pointer ${voiceOutputEnabled
+                  ? "bg-blue-500/20 text-blue-300 border border-blue-500/30"
+                  : "bg-neutral-800/80 text-neutral-300 border border-neutral-700/50 hover:bg-neutral-700"
+                  }`}
+              >
+                {voiceOutputEnabled ? <Volume2 className="h-3.5 w-3.5" /> : <VolumeX className="h-3.5 w-3.5" />}
+                {voiceOutputEnabled ? "Voice on" : "Voice off"}
+              </button>
+            )}
+
             <button
               type="button"
               onClick={toggleLiveMode}
@@ -491,14 +548,21 @@ export default function ChatPage() {
               <div className="flex h-full flex-col items-center justify-center space-y-4 pt-24 text-center text-neutral-500 select-none">
                 <p className="text-4xl font-medium text-neutral-400">Where should we begin?</p>
                 <p className="text-xs text-neutral-600 mt-1 max-w-xs">
-                  Ask questions directly, attach documents to ground responses, or hit{" "}
+                  Ask questions directly, attach documents to ground responses, turn on{" "}
+                  <span className="text-neutral-400">Voice</span> to hear replies, or hit{" "}
                   <span className="text-neutral-400">Go live</span> for hands-free voice chat.
                 </p>
               </div>
             )}
 
             {messages.map((msg) => (
-              <ChatMessageItem key={msg.id} message={msg} />
+              <ChatMessageItem
+                key={msg.id}
+                message={msg}
+                isSpeaking={messageAudio.playingId === msg.id}
+                isSpeechLoading={messageAudio.loadingId === msg.id}
+                onToggleSpeak={handleToggleMessageSpeak}
+              />
             ))}
 
             {loading && <ChatLoadingDots />}

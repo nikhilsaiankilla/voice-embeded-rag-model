@@ -2,6 +2,16 @@
 const SARVAM_STT_URL = "https://api.sarvam.ai/speech-to-text";
 const SARVAM_TTS_URL = "https://api.sarvam.ai/text-to-speech";
 
+// Valid speakers for the bulbul:v3 model (per Sarvam's API error response).
+// Keep this in sync if Sarvam adds/removes voices.
+export const SARVAM_BULBUL_V3_SPEAKERS = [
+    "aditya", "ritu", "ashutosh", "priya", "neha", "rahul", "pooja", "rohan",
+    "simran", "kavya", "amit", "dev", "ishita", "shreya", "ratan", "varun",
+    "manan", "sumit", "roopa", "kabir", "aayan", "shubh", "advait", "anand",
+    "tanya", "tarun", "sunny", "mani", "gokul", "vijay", "shruti", "suhani",
+    "mohit", "kavitha", "rehan", "soham", "rupali", "niharika",
+] as const;
+
 export async function transcribeAudio(audioBlob: Blob, filename = "audio.webm") {
     const formData = new FormData();
     formData.append("file", audioBlob, filename);

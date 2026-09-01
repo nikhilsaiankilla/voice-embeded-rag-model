@@ -139,20 +139,26 @@ export async function deleteSourceVectors(namespace: string, sourceId: string) {
 // Query
 export async function querySimilar(
     namespace: string,
-    queryVector: number[],
-    topK = 5,
-): Promise<ChunkMetadata[]> {
+    vector: number[],
+    topK: number,
+    filter?: Record<string, unknown>
+) {
     const index = getIndex().namespace(namespace);
 
     const result = await index.query({
-        vector: queryVector,
+        vector,
         topK,
         includeMetadata: true,
+        ...(filter ? { filter } : {}),
     });
 
-    return (result.matches ?? [])
-        .filter((m) => m.metadata)
-        .map((m) => m.metadata as ChunkMetadata);
+    return (result.matches ?? []).map((m) => ({
+        id: m.id,
+        score: m.score,
+        text: (m.metadata?.text as string) ?? "",
+        sourceId: (m.metadata?.sourceId as string) ?? "",
+        url: (m.metadata?.url as string) ?? "",
+    }));
 }
 
 export interface TopicHint {
