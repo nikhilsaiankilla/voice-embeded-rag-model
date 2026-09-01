@@ -3,14 +3,16 @@
 
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Bot, User, BookOpen, Globe, Volume2, Loader2, Square } from "lucide-react";
+import { Bot, User, BookOpen, Globe, Volume2, Loader2, Square, ShieldAlert } from "lucide-react";
 
+// In the Message type:
 export type Message = {
     id: string;
     role: "user" | "assistant";
     content: string;
     grounded?: boolean;
     sourceCount?: number;
+    blocked?: boolean; // NEW
 };
 
 interface ChatMessageItemProps {
@@ -102,7 +104,14 @@ export function ChatMessageItem({
                 </div>
 
                 {/* Grounding Info */}
-                {isAssistant && typeof message.grounded === "boolean" && (
+                {isAssistant && message.blocked && (
+                    <span className="flex items-center gap-1.5 px-1 text-[11px] text-amber-500 font-medium">
+                        <ShieldAlert className="h-3 w-3" />
+                        <span>Guardrail: declined to answer</span>
+                    </span>
+                )}
+
+                {isAssistant && !message.blocked && typeof message.grounded === "boolean" && (
                     <span className="flex items-center gap-1.5 px-1 text-[11px] text-neutral-500 font-medium">
                         {message.grounded ? (
                             <>

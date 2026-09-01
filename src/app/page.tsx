@@ -277,12 +277,13 @@ export default function ChatPage() {
                   content: event.content,
                   grounded: event.grounded,
                   sourceCount: event.sourceCount,
+                  blocked: event.blocked, // NEW
                 },
               ]);
             } else {
               setMessages((prev) =>
                 prev.map((m) =>
-                  m.id === streamingId ? { ...m, content: m.content + event.content } : m
+                  m.id === streamingId ? { ...m, content: m.content + event.content, blocked: event.blocked } : m
                 )
               );
             }
