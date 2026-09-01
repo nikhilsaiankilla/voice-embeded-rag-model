@@ -54,8 +54,6 @@ export async function POST(req: NextRequest) {
         });
     }
 
-
-
     const scopedDocumentIds: string[] = Array.isArray(documentIds)
         ? documentIds.filter((id): id is string => typeof id === "string" && id.length > 0)
         : [];
@@ -183,17 +181,38 @@ export async function POST(req: NextRequest) {
         : TOP_K;
 
     t.start("retrieve");
-    let matches = await querySimilar(
-        NAMESPACE,
-        queryVector,
-        topK,
-        isScoped ? { sourceId: { $in: scopedDocumentIds } } : undefined
+
+    // Pinecone call now wrapped in the same retry/backoff policy as the
+    // OpenAI calls above — a transient Pinecone timeout or 5xx no longer
+    // fails the whole turn outright.
+    let matches = await withRetry(
+        () =>
+            querySimilar(
+                NAMESPACE,
+                queryVector,
+                topK,
+                isScoped ? { sourceId: { $in: scopedDocumentIds } } : undefined
+            ),
+        {
+            isRetryable: isRetryableError,
+            getRetryAfterMs,
+            onRetry: (err, attempt, delayMs) =>
+                console.warn(`Pinecone query retry ${attempt}`, { delayMs, err }),
+        }
     );
 
     const retrieveMs = t.end("retrieve");
 
     if (isScoped && matches.length === 0) {
-        matches = await querySimilar(NAMESPACE, queryVector, TOP_K);
+        matches = await withRetry(
+            () => querySimilar(NAMESPACE, queryVector, TOP_K),
+            {
+                isRetryable: isRetryableError,
+                getRetryAfterMs,
+                onRetry: (err, attempt, delayMs) =>
+                    console.warn(`Pinecone fallback query retry ${attempt}`, { delayMs, err }),
+            }
+        );
     }
 
     const retrievalPipelineMs = embedMs + retrieveMs;
