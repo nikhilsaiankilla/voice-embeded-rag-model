@@ -289,10 +289,17 @@ export default function ChatPage() {
             }
 
             // Progressive TTS — only runs when the caller actually wants audio.
+            // Progressive TTS — only runs when the caller actually wants audio.
             if (enableTTS) {
               sentenceBufferRef.current += event.content;
-              const match = sentenceBufferRef.current.match(/^([^.!?\n]+[.!?\n]+)([\s\S]*)$/);
-              if (match) {
+
+              // Loop: pull out EVERY complete sentence available right now, not just
+              // one. A single token chunk from the model can contain multiple
+              // sentence-ending punctuation marks (e.g. a burst after a network
+              // buffering delay), and only extracting one per event added artificial
+              // lag before later sentences got queued for TTS.
+              let match: RegExpMatchArray | null;
+              while ((match = sentenceBufferRef.current.match(/^([^.!?\n]+[.!?\n]+)([\s\S]*)$/))) {
                 const completeSentence = match[1].replace(/[*#_`]/g, "").trim();
                 sentenceBufferRef.current = match[2];
                 if (completeSentence) {

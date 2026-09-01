@@ -15,6 +15,14 @@ const TOP_K = 5;
 const TOP_K_SCOPED_PER_DOC = 8;
 const TOP_K_SCOPED_MAX = 24;
 
+const timers = () => {
+    const marks: Record<string, number> = {};
+    return {
+        start: (label: string) => { marks[label] = performance.now(); },
+        end: (label: string) => Math.round(performance.now() - marks[label]),
+    };
+};
+
 // Guardrail: minimum Pinecone cosine similarity (0–1) for a scoped query's
 // top match to be trusted. Below this, the attached document(s) probably
 // don't actually cover the question — refuse rather than let the model
@@ -135,16 +143,24 @@ export async function POST(req: NextRequest) {
         });
     }
 
+    const t = timers();
+
+    t.start("embed");
+
     const embeddingRes = await openai.embeddings.create({
         model: EMBEDDING_MODEL,
         input: message,
     });
+
+    const embedMs = t.end("embed");
+
     const queryVector = embeddingRes.data[0].embedding;
 
     const topK = isScoped
         ? Math.min(TOP_K_SCOPED_MAX, TOP_K_SCOPED_PER_DOC * scopedDocumentIds.length)
         : TOP_K;
 
+    t.start("retrieve");
     let matches = await querySimilar(
         NAMESPACE,
         queryVector,
@@ -152,10 +168,20 @@ export async function POST(req: NextRequest) {
         isScoped ? { sourceId: { $in: scopedDocumentIds } } : undefined
     );
 
+    const retrieveMs = t.end("retrieve");
+
     if (isScoped && matches.length === 0) {
         matches = await querySimilar(NAMESPACE, queryVector, TOP_K);
     }
 
+    const retrievalPipelineMs = embedMs + retrieveMs;
+
+    // console.log('Retrieval pipeline timing (ms):', {
+    //     embedMs,
+    //     retrieveMs,
+    //     retrievalPipelineMs,
+    // });
+    
     // Guardrail 2: off-topic / low-confidence refusal
     // Only enforced when the user has attached specific documents — a
     // scoped question with a weak top match means the doc(s) likely don't
