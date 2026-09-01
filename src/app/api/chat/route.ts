@@ -5,6 +5,7 @@ import { getDb } from "@/src/db";
 import { chatSessions, chatMessages } from "@/src/db/schema";
 import { openai } from "@/src/lib/openai";
 import { querySimilar } from "@/src/lib/pinecone";
+import { getRetryAfterMs, isRetryableError, withRetry } from "@/src/lib/retry";
 
 const EMBEDDING_MODEL = "text-embedding-3-small";
 const CHAT_MODEL = "gpt-4o-mini";
@@ -46,6 +47,15 @@ export async function POST(req: NextRequest) {
         });
     }
 
+    if (message.length > 4000) {
+        return new Response(JSON.stringify({ error: "message too long" }), {
+            status: 400,
+            headers: { "Content-Type": "application/json" },
+        });
+    }
+
+
+
     const scopedDocumentIds: string[] = Array.isArray(documentIds)
         ? documentIds.filter((id): id is string => typeof id === "string" && id.length > 0)
         : [];
@@ -56,13 +66,16 @@ export async function POST(req: NextRequest) {
     // retrieval or generation budget.
     let moderationFlagged = false;
     try {
-        const moderation = await openai.moderations.create({
-            model: MODERATION_MODEL,
-            input: message,
-        });
+        const moderation = await withRetry(
+            () =>
+                openai.moderations.create({
+                    model: MODERATION_MODEL,
+                    input: message,
+                }),
+            { isRetryable: isRetryableError, getRetryAfterMs }
+        );
         moderationFlagged = moderation.results?.[0]?.flagged ?? false;
     } catch (err) {
-        // Moderation service failing shouldn't block the whole chat.
         console.error("Moderation check failed", err);
     }
 
@@ -147,10 +160,19 @@ export async function POST(req: NextRequest) {
 
     t.start("embed");
 
-    const embeddingRes = await openai.embeddings.create({
-        model: EMBEDDING_MODEL,
-        input: message,
-    });
+    const embeddingRes = await withRetry(
+        () =>
+            openai.embeddings.create({
+                model: EMBEDDING_MODEL,
+                input: message,
+            }),
+        {
+            isRetryable: isRetryableError,
+            getRetryAfterMs,
+            onRetry: (err, attempt, delayMs) =>
+                console.warn(`OpenAI embeddings retry ${attempt}`, { delayMs, err }),
+        }
+    );
 
     const embedMs = t.end("embed");
 
@@ -181,7 +203,7 @@ export async function POST(req: NextRequest) {
     //     retrieveMs,
     //     retrievalPipelineMs,
     // });
-    
+
     // Guardrail 2: off-topic / low-confidence refusal
     // Only enforced when the user has attached specific documents — a
     // scoped question with a weak top match means the doc(s) likely don't
@@ -227,15 +249,24 @@ export async function POST(req: NextRequest) {
             let fullContent = "";
 
             try {
-                const completionStream = await openai.chat.completions.create({
-                    model: CHAT_MODEL,
-                    messages: [
-                        { role: "system", content: systemPrompt },
-                        ...historyMessages,
-                        { role: "user", content: message },
-                    ],
-                    stream: true,
-                });
+                const completionStream = await withRetry(
+                    () =>
+                        openai.chat.completions.create({
+                            model: CHAT_MODEL,
+                            messages: [
+                                { role: "system", content: systemPrompt },
+                                ...historyMessages,
+                                { role: "user", content: message },
+                            ],
+                            stream: true,
+                        }),
+                    {
+                        isRetryable: isRetryableError,
+                        getRetryAfterMs,
+                        onRetry: (err, attempt, delayMs) =>
+                            console.warn(`OpenAI chat completion retry ${attempt}`, { delayMs, err }),
+                    }
+                );
 
                 for await (const chunk of completionStream) {
                     const delta = chunk.choices[0]?.delta?.content;

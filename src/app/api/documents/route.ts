@@ -8,6 +8,7 @@ import PDFParser from "pdf2json";
 import mammoth from "mammoth";
 import * as XLSX from "xlsx";
 import JSZip from "jszip";
+import { isRetryableError, withRetry, getRetryAfterMs } from "@/src/lib/retry";
 
 const NAMESPACE = process.env.PINECONE_NAMESPACE ?? "default";
 const EMBEDDING_MODEL = "text-embedding-3-small";
@@ -32,10 +33,19 @@ function chunkText(text: string): string[] {
 }
 
 async function embedBatch(texts: string[]): Promise<number[][]> {
-    const res = await openai.embeddings.create({
-        model: EMBEDDING_MODEL,
-        input: texts,
-    });
+    const res = await withRetry(
+        () =>
+            openai.embeddings.create({
+                model: EMBEDDING_MODEL,
+                input: texts,
+            }),
+        {
+            isRetryable: isRetryableError,
+            getRetryAfterMs,
+            onRetry: (err, attempt, delayMs) =>
+                console.warn(`OpenAI embeddings retry ${attempt}`, { delayMs, err }),
+        }
+    );
     return res.data.map((d) => d.embedding);
 }
 

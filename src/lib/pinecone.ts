@@ -3,6 +3,7 @@
 // One index, namespaced per bot (bot.namespace from DB).
 import { Pinecone, type RecordMetadata } from '@pinecone-database/pinecone';
 import { pineconeUpsertLimiter } from './ratelimit';
+import { getErrorStatus, withRetry, getRetryAfterMs } from './retry';
 
 // Client (singleton)
 let _client: Pinecone | null = null;
@@ -56,37 +57,14 @@ async function upsertWithRateLimit<T>(fn: () => Promise<T>): Promise<T> {
         await sleep(waitMs);
     }
 
-    // Local retry loop for 429s that still occur (limiter is proactive, not a
-    // hard guarantee — Pinecone's real-time usage can differ slightly).
-    let attempt = 0;
-    for (; ;) {
-        try {
-            return await fn();
-        } catch (err) {
-            const status =
-                (err as { status?: number; response?: { status?: number } })?.status ??
-                (err as { response?: { status?: number } })?.response?.status;
-
-            if (status !== 429 || attempt >= MAX_BACKOFF_ATTEMPTS) throw err;
-
-            const retryAfterHeader =
-                (
-                    err as {
-                        headers?: Record<string, string>;
-                        response?: { headers?: Record<string, string> };
-                    }
-                )?.headers?.['retry-after'] ??
-                (err as { response?: { headers?: Record<string, string> } })?.response
-                    ?.headers?.['retry-after'];
-
-            const retryAfterMs = retryAfterHeader
-                ? Number(retryAfterHeader) * 1000
-                : Math.min(1000 * 2 ** attempt, 15_000) + Math.random() * 250;
-
-            attempt++;
-            await sleep(retryAfterMs);
-        }
-    }
+    // Local retry for 429s that still slip through (limiter is proactive,
+    // not a hard guarantee). +1 because withRetry's maxAttempts counts the
+    // first try; the original loop allowed 5 retries after it.
+    return withRetry(fn, {
+        maxAttempts: MAX_BACKOFF_ATTEMPTS + 1,
+        isRetryable: (err) => getErrorStatus(err) === 429,
+        getRetryAfterMs,
+    });
 }
 
 // Upsert
