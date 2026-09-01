@@ -16,7 +16,7 @@ export function useVoiceActivityDetector() {
     const analyserRef = useRef<AnalyserNode | null>(null);
     const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
     const rafRef = useRef<number | null>(null);
-    const dataRef = useRef<Uint8Array | null>(null);
+    const dataRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
 
     const speakingRef = useRef(false);
     const speechFrameCountRef = useRef(0);
@@ -42,7 +42,7 @@ export function useVoiceActivityDetector() {
         audioCtxRef.current = ctx;
         analyserRef.current = analyser;
         sourceRef.current = source;
-        dataRef.current = new Uint8Array(analyser.fftSize);
+        dataRef.current = new Uint8Array(new ArrayBuffer(analyser.fftSize));
         speakingRef.current = false;
         speechFrameCountRef.current = 0;
         silenceStartRef.current = null;
