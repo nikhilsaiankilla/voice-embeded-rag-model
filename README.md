@@ -215,4 +215,5 @@ npx tsx scripts/latency-bench.ts
 
 ## Demo
 
-Video walkthrough: `[add your Google Drive link here]`
+Video walkthrough: https://drive.google.com/file/d/1MEA5WSrS10l7WKW4K6o0Ut6bYOmpsOfK/view?usp=sharing
+Live Url: https://voice-embeded-rag-model.vercel.app/

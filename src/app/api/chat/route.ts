@@ -24,12 +24,11 @@ const timers = () => {
     };
 };
 
-// Guardrail: minimum Pinecone cosine similarity (0–1) for a scoped query's
-// top match to be trusted. Below this, the attached document(s) probably
-// don't actually cover the question — refuse rather than let the model
-// paper over the gap with general knowledge. Tune against real score
-// distributions from your embedding model/corpus.
-const SCOPED_CONFIDENCE_THRESHOLD = 0.72;
+// Guardrail 2 thresholds — see the note above isLowConfidence below for why
+// scoped and fallback matches use different bars.
+const SCOPED_MIN_AVG_SCORE = 0.35;
+const FALLBACK_MIN_AVG_SCORE = 0.72;
+const TOP_N_FOR_CONFIDENCE = 3;
 
 const REFUSAL_OFF_TOPIC =
     "I couldn't find anything in the attached document(s) that answers this. Could you rephrase, or ask something the document(s) actually cover?";
@@ -182,9 +181,9 @@ export async function POST(req: NextRequest) {
 
     t.start("retrieve");
 
-    // Pinecone call now wrapped in the same retry/backoff policy as the
-    // OpenAI calls above — a transient Pinecone timeout or 5xx no longer
-    // fails the whole turn outright.
+    // Pinecone call wrapped in the same retry/backoff policy as the OpenAI
+    // calls above — a transient Pinecone timeout or 5xx no longer fails the
+    // whole turn outright.
     let matches = await withRetry(
         () =>
             querySimilar(
@@ -203,6 +202,16 @@ export async function POST(req: NextRequest) {
 
     const retrieveMs = t.end("retrieve");
 
+    let matchesAreScoped = isScoped;
+
+    // Tracks whether `matches` currently holds results from the ORIGINAL
+    // sourceId-filtered (scoped) query, or from the unscoped fallback below.
+    // This matters for the confidence check further down: scoped matches
+    // are already guaranteed to come from the attached document(s), so a
+    // low similarity score there just means the question was phrased
+    // abstractly (e.g. "summarize this") — not that the doc lacks the
+    // answer. Fallback matches carry no such guarantee, so they still need
+    // a real similarity bar.
     if (isScoped && matches.length === 0) {
         matches = await withRetry(
             () => querySimilar(NAMESPACE, queryVector, TOP_K),
@@ -213,22 +222,23 @@ export async function POST(req: NextRequest) {
                     console.warn(`Pinecone fallback query retry ${attempt}`, { delayMs, err }),
             }
         );
+        matchesAreScoped = false;
     }
 
     const retrievalPipelineMs = embedMs + retrieveMs;
 
-    // console.log('Retrieval pipeline timing (ms):', {
-    //     embedMs,
-    //     retrieveMs,
-    //     retrievalPipelineMs,
-    // });
+    const topMatches = matches.slice(0, TOP_N_FOR_CONFIDENCE);
+    const avgTopScore =
+        topMatches.length > 0
+            ? topMatches.reduce((sum, m) => sum + (m.score ?? 0), 0) / topMatches.length
+            : 0;
 
-    // Guardrail 2: off-topic / low-confidence refusal
-    // Only enforced when the user has attached specific documents — a
-    // scoped question with a weak top match means the doc(s) likely don't
-    // cover it, so refuse instead of letting the model improvise an answer.
-    const topScore = matches[0]?.score ?? 0;
-    const isLowConfidence = isScoped && (matches.length === 0 || topScore < SCOPED_CONFIDENCE_THRESHOLD);
+    const confidenceThreshold = matchesAreScoped ? SCOPED_MIN_AVG_SCORE : FALLBACK_MIN_AVG_SCORE;
+    const isLowConfidence = isScoped && (matches.length === 0 || avgTopScore < confidenceThreshold);
+
+    // MOVED UP — log unconditionally, before either guardrail return, so we
+    // can see exactly what happened on refused requests too.
+
 
     if (isLowConfidence) {
         return new Response(sendGuardrailRefusal(REFUSAL_OFF_TOPIC, matches.length), {
